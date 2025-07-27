@@ -104,7 +104,7 @@ These folders contain the complete set of files required to perform the domain-s
   - target_edge_index.pt
   - target_features.pt
 
-    *These .pt files contain the embedding and structural information necessary for executing inference using the pre-trained model.
+  *These .pt files contain the embedding and structural information necessary for executing inference using the pre-trained model.
 
 - /metadata/
   - model_id_frequency.csv – Frequency of all model nodes
@@ -114,7 +114,7 @@ These folders contain the complete set of files required to perform the domain-s
   - reverse_model_dict.json – Maps model node indices to their original names
   - reverse_target_dict.json – Maps target node indices to their original names
 
-    *These dictionaries are essential for interpreting inference results.
+  *These dictionaries are essential for interpreting inference results.
 
 ### Current version
 | Domain          | Version  | Upload Date | Description                                                                                                           | Reference    |

@@ -97,7 +97,9 @@ A pre-trained GNN model developed from previously constructed datasets is availa
 📁 [skeletal_muscle/](https://storage.googleapis.com/skeletal_muscle/sm_v1/)
 
 These folders contain the complete set of files required to perform the domain-specific inference.
+
 **To access previous versions** of the pre-trained model, please replace the current version name (e.g., sm_v1) in the URL with the desired version name.
+
 Each version is organized under its own subdirectory and includes the full set of model, embedding, and metadata files.
 
 ### Downloadable Files

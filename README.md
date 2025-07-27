@@ -25,8 +25,8 @@ Main directory/
 │   ├── explor_data/
 │   ├── gnn_data/
 │   ├── input_data/
-│       ├──input_pt_data/
-│       └──input_temp_json/
+│   │   ├──input_pt_data/
+│   │   └──input_temp_json/
 │   ├── pt_data/
 │   └── temp_json/
 ├── embedding_for_input_data.py

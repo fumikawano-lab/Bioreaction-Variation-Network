@@ -64,14 +64,19 @@ Main directory/
 
 - Python ≥ 3.8
 - Recommended packages:
-  - `torch`
-  - `torch_geometric`
-  - `numpy`
-  - `scikit-learn`
-  - `matplotlib`
-  - `pandas`
-  - `networkx`
-  - `deap`
+  - `torch` – Deep learning framework (PyTorch)
+  - `torch_geometric` – Graph Neural Networks for PyTorch
+  - `torch_scatter` – Required dependency for PyG
+  - `transformers` – For BERT-based embedding
+  - `numpy` – Numerical computation
+  - `pandas` – Data handling and analysis
+  - `scikit-learn` – PCA, standardization
+  - `matplotlib` – Visualization
+  - `networkx` – Graph operations and visualization
+  - `deap` – Evolutionary algorithm framework
+  - `scipy` – Cosine similarity
+  - `tqdm` – Progress bar
+  - `joblib` – Parallel processing
 
 > Use `pip install -r requirements.txt` if the list is provided.
 

@@ -64,7 +64,7 @@ Main directory/
 
 ## Requirements
 
-- Python ≥ 3.8
+- Python ≥ 3.10.0
 - Recommended packages:
   - `torch` – Deep learning framework (PyTorch)
   - `torch_geometric` – Graph Neural Networks for PyTorch

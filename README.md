@@ -35,7 +35,7 @@ Main directory/
 ├── network_inference.py
 └── temp_json_to_pt_conversion.py
 ```
-**Note:** To perform embedding, a BioBERT model must be available in the same directory.  
+**Note:** To perform embedding, a BioBERT model must be available in the main directory.  
 Specifically, the following files are required:
 - `model.safetensors`
 - `config.json`

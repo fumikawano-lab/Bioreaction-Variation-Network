@@ -15,20 +15,22 @@ This repository provides the full implementation of the architecture, from data 
 ---
 
 ## Directory Structure
+```
 Main directory/
 ├── data/
-│ ├── clean_data/
-│ ├── evolution_output/
-│ ├── explor_data/
-│ ├── gnn_data/
-│ ├── input_data/
-│ ├── pt_data/
-│ └── temp_json/
+│   ├── clean_data/
+│   ├── evolution_output/
+│   ├── explor_data/
+│   ├── gnn_data/
+│   ├── input_data/
+│   ├── pt_data/
+│   └── temp_json/
 ├── embedding_for_input_data.py
 ├── embedding_for_training_data.py
 ├── learning.py
 ├── network_inference.py
 └── temp_json_to_pt_conversion.py
+```
 
 ---
 

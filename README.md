@@ -111,9 +111,9 @@ These folders contain the complete set of files required to perform the domain-s
 *These dictionaries are essential for interpreting inference results.
 
 ### Current version
-Domain			        Version		  Upload date	    Description													                                                                              Reference
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-Skeletal muscle		  sm_v1.0		  July 2025	      Pre-trained model based on 65,096 literature-derived biological response datasets focused on skeletal muscle	    Unpublished
+| Domain          | Version  | Upload Date | Description                                                                                                           | Reference    |
+|-----------------|----------|-------------|-----------------------------------------------------------------------------------------------------------------------|--------------|
+| Skeletal muscle | sm_v1.0  | July 2025   | Pre-trained model based on 65,096 literature-derived biological response datasets focused on skeletal muscle          | Unpublished  |
 
 *If you use this pre-trained model in your research, please cite the associated article (once published) or refer to this repository.
 

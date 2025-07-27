@@ -94,7 +94,7 @@ You are free to use, adapt, and distribute this work, with appropriate credit.
 ## Pre-trained Model
 A pre-trained GNN model developed from previously constructed datasets is available on **Google Cloud Storage** at the following location:
 
-📁 [skeletal_muscle/]
+📁 [skeletal_muscle/](https://storage.googleapis.com/skeletal_muscle/)
 
 These folders contain the complete set of files required to perform the domain-specific inference.
 

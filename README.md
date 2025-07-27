@@ -103,6 +103,7 @@ These folders contain the complete set of files required to perform the domain-s
 Each version is organized under its own subdirectory and includes the full set of model, embedding, and metadata files.
 
 ### Downloadable Files
+Note: To download individual files, append the corresponding subdirectory and file name to the domain-specific URL.  
 - /gnn_model/
   - gnn_model_final.pt – Final trained GNN model
 

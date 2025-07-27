@@ -94,9 +94,11 @@ You are free to use, adapt, and distribute this work, with appropriate credit.
 ## Pre-trained Model
 A pre-trained GNN model developed from previously constructed datasets is available on **Google Cloud Storage** at the following location:
 
-📁 [skeletal_muscle/](https://storage.googleapis.com/skeletal_muscle/)
+📁 [skeletal_muscle/](https://storage.googleapis.com/skeletal_muscle/sm_v1/)
 
 These folders contain the complete set of files required to perform the domain-specific inference.
+**To access previous versions** of the pre-trained model, please replace the current version name (e.g., sm_v1) in the URL with the desired version name.
+Each version is organized under its own subdirectory and includes the full set of model, embedding, and metadata files.
 
 ### Downloadable Files
 - /gnn_model/
@@ -128,7 +130,7 @@ These folders contain the complete set of files required to perform the domain-s
 ### Current version
 | Domain          | Version  | Upload Date | Description                                                                                                           | Reference    |
 |-----------------|----------|-------------|-----------------------------------------------------------------------------------------------------------------------|--------------|
-| Skeletal muscle | sm_v1.0  | July 2025   | Pre-trained model based on 65,096 literature-derived biological response datasets focused on skeletal muscle. GNN model was trained over 200 epochs.          | Unpublished  |
+| Skeletal muscle | sm_v1 | July 2025 | Pre-trained model based on 65,096 literature-derived biological response datasets focused on skeletal muscle. GNN model was trained over 200 epochs.   | Unpublished  |
 
 *If you use this pre-trained model in your research, please cite the associated article (once published) or refer to this repository.
 

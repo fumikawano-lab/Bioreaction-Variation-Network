@@ -10,7 +10,7 @@ This repository provides the full implementation of the architecture, from data 
 
 - Mechanism inference of biological response diversity
 - Visualization of individualized molecular pathways
-- Research, clinical, and commercial uses (licensed under CC BY 4.0)
+- Suitable for research, expert reasoning, and educational purposes — including commercial use under the CC BY 4.0 license
 
 ---
 

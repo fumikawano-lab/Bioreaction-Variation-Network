@@ -15,7 +15,7 @@ This repository provides the full implementation of the architecture, from data 
 ---
 
 ## Directory Structure
-Note: The following is the recommended directory structure for using the provided code and pre-trained models in this repository.
+The following is the recommended directory structure for using the provided code and pre-trained models in this repository.
 To ensure compatibility with the scripts, please organize your files accordingly.
 ```
 Main directory/

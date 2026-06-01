@@ -150,8 +150,6 @@ If you use this code in your research, please cite the following article:
 
 Kawano F. A graph neural network model for inferring interindividual variation from experimental biological data. Sci Rep 15: 39680, 2025. https://doi.org/10.1038/s41598-025-23320-4
 
-Once published, the DOI and full citation will be provided.
-
 ---
 
 ## Contact

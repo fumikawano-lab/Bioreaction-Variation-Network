@@ -138,6 +138,7 @@ Each version is organized under its own subdirectory and includes the full set o
 ### Current version
 | Domain          | Version  | Upload Date | Description                                                                                                           | Reference    |
 |-----------------|----------|-------------|-----------------------------------------------------------------------------------------------------------------------|--------------|
+| Depression and brain | db_v1 | Aug 2026 | Pre-trained model based on 19,763 literature-derived biological response datasets focused on “depression AND (brain OR hippocampus)”. GNN model was trained over 200 epochs.   | unpublished |
 | Skeletal muscle | sm_v1 | July 2025 | Pre-trained model based on 65,096 literature-derived biological response datasets focused on skeletal muscle. GNN model was trained over 200 epochs.   | [Sci Rep 15: 39680 (2025)](https://www.nature.com/articles/s41598-025-23320-4) |
 
 *If you use this pre-trained model in your research, please cite the associated article (once published) or refer to this repository.

@@ -100,6 +100,7 @@ You are free to use, adapt, and distribute this work, with appropriate credit.
 A pre-trained GNN model developed from previously constructed datasets is available on **Google Cloud Storage** at the following location:
 
 📁 [skeletal_muscle/](https://storage.googleapis.com/skeletal_muscle/sm_v1/)
+📁 [depression_brain/](https://storage.googleapis.com/depression_brain/db_v1/)
 
 These folders contain the complete set of files required to perform the domain-specific inference.
 
@@ -115,11 +116,8 @@ Each version is organized under its own subdirectory and includes the full set o
 - /pt_data/
   - edge_attr.pt
   - edge_index.pt
-  - edge_weight_with_nodes.pt
   - model_features.pt
-  - model_features_with_nodes.pt
   - target_edge_attr.pt
-  - target_edge_dict.pt
   - target_edge_index.pt
   - target_features.pt
 

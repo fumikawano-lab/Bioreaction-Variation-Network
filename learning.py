@@ -1,600 +1,566 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "193a0d9f-1bef-4862-b0f3-6002ef52791f",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import os\n",
-    "import csv\n",
-    "import torch\n",
-    "import torch.nn as nn\n",
-    "import torch.nn.functional as F\n",
-    "import torch_scatter\n",
-    "from torch_geometric.nn import GATConv\n",
-    "import matplotlib.pyplot as plt\n",
-    "from sklearn.decomposition import PCA\n",
-    "from sklearn.preprocessing import StandardScaler\n",
-    "import pandas as pd\n",
-    "\n",
-    "os.environ[\"CUDA_LAUNCH_BLOCKING\"] = \"1\"\n",
-    "device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
-    "\n",
-    "model_node_features = torch.load(\"./data/pt_data/model_features.pt\")\n",
-    "model_target_edge_index = torch.load(\"./data/pt_data/edge_index.pt\").to(device)\n",
-    "model_target_edge_attr = torch.load(\"./data/pt_data/edge_attr.pt\").to(device).float()\n",
-    "target_node_features = torch.load(\"./data/pt_data/target_features.pt\")\n",
-    "target_edge_index = torch.load(\"./data/pt_data/target_edge_index.pt\").to(device)\n",
-    "target_edge_attr = torch.load(\"./data/pt_data/target_edge_attr.pt\").to(device).float()\n",
-    "target_edge_dict = torch.load(\"./data/pt_data/target_edge_dict.pt\")\n",
-    "\n",
-    "for key in target_edge_dict.keys():\n",
-    "    target_edge_dict[key] = (target_edge_dict[key][0].to(device).float(),\n",
-    "                             target_edge_dict[key][1].to(device).float())\n",
-    "\n",
-    "def get_model_features(edge_index, model_features):\n",
-    "    source_nodes = edge_index[0].tolist()\n",
-    "    extracted_features = []\n",
-    "\n",
-    "    for model_id in source_nodes:\n",
-    "        if model_id in model_features:\n",
-    "            model_features_tensor = model_features[model_id].to(device).float()\n",
-    "        else:\n",
-    "            model_features_tensor = torch.zeros((768,), dtype=torch.float32, device=device)\n",
-    "        extracted_features.append(model_features_tensor)\n",
-    "\n",
-    "    if len(extracted_features) == 0:\n",
-    "        return torch.empty((0, 768), dtype=torch.float32, device=device)\n",
-    "\n",
-    "    model_feature_tensor = torch.stack(extracted_features).to(device).float()\n",
-    "    return model_feature_tensor\n",
-    "\n",
-    "def get_target_features(edge_index, target_node_features):\n",
-    "    target_nodes = edge_index[1].tolist()\n",
-    "    extracted_features = []\n",
-    "\n",
-    "    for target_id in target_nodes:\n",
-    "        if target_id in target_node_features:\n",
-    "            target_features_tensor = target_node_features[target_id].to(device).float()\n",
-    "        else:\n",
-    "            target_features_tensor = torch.zeros((768,), dtype=torch.float32, device=device)\n",
-    "        extracted_features.append(target_features_tensor)\n",
-    "\n",
-    "    if len(extracted_features) == 0:\n",
-    "        return torch.empty((0, 768), dtype=torch.float32, device=device)\n",
-    "\n",
-    "    target_feature_tensor = torch.stack(extracted_features).to(device).float()\n",
-    "    return target_feature_tensor\n",
-    "\n",
-    "output_dir = \"./data/gnn_data/\"\n",
-    "os.makedirs(output_dir, exist_ok=True)\n",
-    "\n",
-    "loss_records = []\n",
-    "\n",
-    "edge_weight_list = []\n",
-    "edge_weight_index_list = []\n",
-    "\n",
-    "model_node_features = get_model_features(model_target_edge_index, model_node_features)\n",
-    "target_node_features = get_target_features(model_target_edge_index, target_node_features)\n",
-    "\n",
-    "model_in_channels = model_node_features.shape[1]\n",
-    "target_in_channels = target_node_features.shape[1]\n",
-    "edge_in_channels = model_target_edge_attr.shape[1]\n",
-    "target_edge_in_channels = target_edge_attr.shape[1]\n",
-    "\n",
-    "class ModelTargetAttentionGAT(nn.Module):\n",
-    "    def __init__(self, model_in_channels, target_in_channels, edge_in_channels, hidden_channels=256, heads=8, total_epochs=10):\n",
-    "        super(ModelTargetAttentionGAT, self).__init__()\n",
-    "\n",
-    "        self.hidden_channels = hidden_channels\n",
-    "        self.heads = heads\n",
-    "        self.total_epochs = total_epochs\n",
-    "\n",
-    "        self.model_transform = nn.Linear(model_in_channels, heads * hidden_channels, bias=False)\n",
-    "        self.target_transform = nn.Linear(target_in_channels, heads * hidden_channels, bias=False)\n",
-    "\n",
-    "        self.edge_attn_transform = nn.Linear(768, heads * hidden_channels, bias=False)\n",
-    "\n",
-    "        self.gat_target = GATConv(heads * hidden_channels, hidden_channels, heads=heads, concat=True)\n",
-    "\n",
-    "        self.batch_norm1 = nn.BatchNorm1d(2048, momentum=0.01)\n",
-    "        self.batch_norm2 = nn.BatchNorm1d(2048, momentum=0.01)\n",
-    "        \n",
-    "        self.prelu_m_t = nn.PReLU(num_parameters=heads)\n",
-    "        self.prelu_m_n = nn.PReLU(num_parameters=heads)\n",
-    "        self.prelu_t = nn.PReLU(num_parameters=heads)\n",
-    "\n",
-    "        self.temperature_m_t = nn.Parameter(torch.tensor(1.0), requires_grad=True)\n",
-    "        self.temperature_m_n = nn.Parameter(torch.tensor(1.0), requires_grad=True)\n",
-    "        self.temperature_t = nn.Parameter(torch.tensor(1.0), requires_grad=True)\n",
-    "\n",
-    "        self.min_alpha, self.max_alpha = 0.05, 0.2\n",
-    "        self.min_temp, self.max_temp = 0.5, 1.5\n",
-    "        \n",
-    "        self.reset_parameters()\n",
-    "        \n",
-    "    def reset_parameters(self):\n",
-    "        nn.init.xavier_uniform_(self.model_transform.weight)\n",
-    "        nn.init.xavier_uniform_(self.target_transform.weight)\n",
-    "        nn.init.xavier_uniform_(self.edge_attn_transform.weight)\n",
-    "\n",
-    "    def forward(self, model_x, target_x, edge_index, edge_attr):\n",
-    "        model_x_proj = self.model_transform(model_x).view(-1, self.heads * self.hidden_channels)\n",
-    "        target_x_proj = self.target_transform(target_x).view(-1, self.heads * self.hidden_channels)\n",
-    "\n",
-    "        model_x_proj = self.batch_norm1(model_x_proj)\n",
-    "        target_x_proj = self.batch_norm2(target_x_proj)\n",
-    "\n",
-    "        model_x_proj = model_x_proj.view(-1, self.heads, self.hidden_channels)\n",
-    "        target_x_proj = target_x_proj.view(-1, self.heads, self.hidden_channels)\n",
-    "\n",
-    "        max_valid_index = target_x_proj.shape[0] - 1\n",
-    "        out_of_bounds_mask = edge_index[1] > max_valid_index\n",
-    "\n",
-    "        edge_attr_proj = edge_attr[:, :768] - edge_attr[:, 768:]\n",
-    "\n",
-    "        edge_attn_values = self.edge_attn_transform(edge_attr_proj)\n",
-    "        edge_attn_values = edge_attn_values.view(-1, self.heads, self.hidden_channels)\n",
-    "\n",
-    "        selected_target_x_proj = target_x_proj.index_select(0, edge_index[1])\n",
-    "\n",
-    "        with torch.no_grad():\n",
-    "            self.prelu_m_t.weight.data.clamp_(self.min_alpha, self.max_alpha)\n",
-    "            self.prelu_m_n.weight.data.clamp_(self.min_alpha, self.max_alpha)\n",
-    "            self.prelu_t.weight.data.clamp_(self.min_alpha, self.max_alpha)\n",
-    "            \n",
-    "        attn_m_t = torch.matmul(model_x_proj.index_select(0, edge_index[0]), edge_attn_values.transpose(-1, -2))\n",
-    "        attn_m_t = attn_m_t.mean(dim=-1)\n",
-    "        attn_m_t = self.prelu_m_t(attn_m_t)\n",
-    "        attn_m_t = torch.softmax(attn_m_t / torch.clamp(self.temperature_m_t, self.min_temp, self.max_temp), dim=1)\n",
-    "\n",
-    "        attn_m_n = torch.matmul(model_x_proj.index_select(0, edge_index[0]), edge_attn_values.transpose(-1, -2))\n",
-    "        attn_m_n = attn_m_n.mean(dim=-1)\n",
-    "        attn_m_n = self.prelu_m_n(attn_m_n)\n",
-    "        attn_m_n = torch.softmax(attn_m_n / torch.clamp(self.temperature_m_n, self.min_temp, self.max_temp), dim=1)\n",
-    "\n",
-    "        attn_t = torch.matmul(target_x_proj.index_select(0, edge_index[1]), edge_attn_values.transpose(-1, -2))\n",
-    "        attn_t = attn_t.mean(dim=-1)\n",
-    "        attn_t = self.prelu_t(attn_t)\n",
-    "        attn_t = torch.softmax(attn_t / torch.clamp(self.temperature_t, self.min_temp, self.max_temp), dim=1)\n",
-    "\n",
-    "        unique_target_nodes = edge_index[1].unique()\n",
-    "\n",
-    "        target_x_proj = target_x_proj.view(edge_index.shape[1], 8, 256)\n",
-    "        edge_attn_values = edge_attn_values.view(edge_index.shape[1], 8, 256)\n",
-    "\n",
-    "        target_x_new = (\n",
-    "            attn_m_n.unsqueeze(-1) * target_x_proj\n",
-    "            + attn_m_t.unsqueeze(-1) * edge_attn_values\n",
-    "            + attn_t.unsqueeze(-1) * target_x_proj\n",
-    "        )\n",
-    "\n",
-    "        target_x_new = target_x_new.view(edge_index.shape[1], 2048)\n",
-    "\n",
-    "        target_x_new = torch_scatter.scatter_mean(\n",
-    "            target_x_new.float(), edge_index[1], dim=0, dim_size=unique_target_nodes.shape[0]\n",
-    "        )\n",
-    "\n",
-    "        attn_sum = attn_m_t + attn_m_n + attn_t\n",
-    "        attn_score = torch_scatter.scatter_mean(attn_sum.float(), edge_index[1], dim=0, dim_size=unique_target_nodes.shape[0])\n",
-    "\n",
-    "        target_index = unique_target_nodes.tolist()\n",
-    "\n",
-    "        target_index = torch.tensor(target_index, dtype=torch.long, device=target_x_new.device)\n",
-    "\n",
-    "        return target_x_new, target_index, attn_score\n",
-    "\n",
-    "class FeatureEnhancement(nn.Module):\n",
-    "    def __init__(self, in_channels=2048):\n",
-    "        super(FeatureEnhancement, self).__init__()\n",
-    "        self.fc1 = nn.Linear(in_channels, in_channels)\n",
-    "        self.bn1 = nn.BatchNorm1d(in_channels, momentum=0.01)\n",
-    "\n",
-    "    def forward(self, x):\n",
-    "        x = self.fc1(x)\n",
-    "        x = self.bn1(x)\n",
-    "        x = F.relu(x)\n",
-    "        \n",
-    "        return x\n",
-    "\n",
-    "class TargetFeatureEnhancement(nn.Module):\n",
-    "    def __init__(self, in_channels=2048, out_channels=256):\n",
-    "        super(TargetFeatureEnhancement, self).__init__()\n",
-    "        self.fc1 = nn.Linear(in_channels, 1024)\n",
-    "        self.bn1 = nn.BatchNorm1d(1024, momentum=0.01)\n",
-    "        \n",
-    "        self.fc2 = nn.Linear(1024, 512)\n",
-    "        self.bn2 = nn.BatchNorm1d(512, momentum=0.01)\n",
-    "        \n",
-    "        self.fc3 = nn.Linear(512, out_channels)\n",
-    "        self.bn3 = nn.BatchNorm1d(out_channels, momentum=0.01)\n",
-    "\n",
-    "    def forward(self, x):\n",
-    "        x = self.fc1(x)\n",
-    "        x = self.bn1(x)\n",
-    "        x = F.relu(x)\n",
-    "        x = self.fc2(x)\n",
-    "        x = self.bn2(x)\n",
-    "        x = F.relu(x)\n",
-    "        x = self.fc3(x)\n",
-    "        x = self.bn3(x)\n",
-    "        x = F.relu(x)\n",
-    "        \n",
-    "        return x\n",
-    "\n",
-    "class TargetDominationLayer(nn.Module):\n",
-    "    def __init__(self, hidden_channels, init_decay=0.8):\n",
-    "        super(TargetDominationLayer, self).__init__()\n",
-    "\n",
-    "        self.edge_fc = nn.Linear(768, 256, bias=False)\n",
-    "\n",
-    "        with torch.no_grad():\n",
-    "            Q, _ = torch.linalg.qr(torch.randn(768, 256))\n",
-    "            self.edge_fc.weight.copy_(Q.T)\n",
-    "\n",
-    "        self.edge_fc.weight.requires_grad = False\n",
-    "\n",
-    "        self.x_fc = nn.Linear(256, 256)\n",
-    "        self.x_bn = nn.BatchNorm1d(256, momentum=0.01)\n",
-    "\n",
-    "    def forward(self, x, target_edge_index, target_edge_attr, target_index, target_x_new):\n",
-    "        device = x.device  \n",
-    "\n",
-    "        x_j = x[target_index]\n",
-    "\n",
-    "        mask = torch.isin(target_edge_index[1], target_index)\n",
-    "\n",
-    "        sorted_mask_indices = torch.argsort(torch.searchsorted(target_index, target_edge_index[1][mask]))\n",
-    "        mask_sorted = mask.nonzero(as_tuple=True)[0][sorted_mask_indices]\n",
-    "\n",
-    "        filtered_edge_index = target_edge_index[:, mask_sorted]\n",
-    "\n",
-    "        target_ids = filtered_edge_index[1]\n",
-    "        source_ids = filtered_edge_index[0]\n",
-    "\n",
-    "        x_i = target_x_new[source_ids]\n",
-    "        x_i_ave = torch_scatter.scatter_mean(\n",
-    "            x_i.float(), target_index[target_ids], dim=0, dim_size=x.shape[0]\n",
-    "        )\n",
-    "\n",
-    "        x_diff = x_i_ave - x_j\n",
-    "\n",
-    "        x_diff = self.x_fc(x_diff)\n",
-    "        x_diff = self.x_bn(x_diff)\n",
-    "        x_diff = F.relu(x_diff)\n",
-    "\n",
-    "        sorted_edge_attr = target_edge_attr[mask_sorted]\n",
-    "\n",
-    "        edge_attr_selected = torch_scatter.scatter_mean(\n",
-    "            sorted_edge_attr.float(),\n",
-    "            target_ids,\n",
-    "            dim=0,\n",
-    "            dim_size=x.shape[0]\n",
-    "        )\n",
-    "\n",
-    "        edge_diff = edge_attr_selected[:, :768] - edge_attr_selected[:, 768:]\n",
-    "\n",
-    "        edge_diff = self.edge_fc(edge_diff)\n",
-    "        edge_diff = (edge_diff - edge_diff.mean(dim=0)) / (edge_diff.std(dim=0) + 1e-6)\n",
-    "        edge_diff = F.relu(edge_diff)\n",
-    "\n",
-    "        memory_applied = x_diff + x_j\n",
-    "\n",
-    "        return memory_applied, x_diff, edge_diff\n",
-    "\n",
-    "class DominationLayer(nn.Module):\n",
-    "    def __init__(self, hidden_channels):\n",
-    "        super(DominationLayer, self).__init__()\n",
-    "\n",
-    "        self.fc_dom_true = nn.Linear(768, 256, bias=False)\n",
-    "\n",
-    "        with torch.no_grad():\n",
-    "            Q, _ = torch.linalg.qr(torch.randn(768, 256))\n",
-    "            self.fc_dom_true.weight.copy_(Q.T)\n",
-    "\n",
-    "        self.fc_dom_true.weight.requires_grad = False\n",
-    "        \n",
-    "        self.fc1 = nn.Linear(hidden_channels, 256)  \n",
-    "        self.bn1 = nn.BatchNorm1d(256, momentum=0.01)\n",
-    "        self.fc2 = nn.Linear(256, 256)\n",
-    "        self.bn2 = nn.BatchNorm1d(256, momentum=0.01)\n",
-    "\n",
-    "    def forward(self, x, target_index, target_edge_index, target_edge_attr, model_target_edge_index, target_node_features, memory_applied):\n",
-    "        dom_Wj_list = []\n",
-    "        Aj_mean_list = []\n",
-    "\n",
-    "        for Aj in target_index:\n",
-    "            mask_Aj = target_edge_index[1] == Aj\n",
-    "            selected_edges = target_edge_index[:, mask_Aj]\n",
-    "            selected_edge_attr = target_edge_attr[mask_Aj]\n",
-    "\n",
-    "            if selected_edges.shape[1] == 0:\n",
-    "                Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6\n",
-    "\n",
-    "                mask_Aj_in_features = model_target_edge_index[1] == Aj\n",
-    "                Aj_features = target_node_features[mask_Aj_in_features]\n",
-    "\n",
-    "                if Aj_features.shape[0] > 1:\n",
-    "                    Aj_mean = Aj_features.mean(dim=0, keepdim=True)\n",
-    "                elif Aj_features.shape[0] == 1:\n",
-    "                    Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features\n",
-    "                else:\n",
-    "                    Aj_mean = torch.zeros((1, 768), device=target_edge_attr.device)\n",
-    "\n",
-    "                dom_Wj_list.append(Wj.unsqueeze(0))\n",
-    "                Aj_mean_list.append(Aj_mean)\n",
-    "                continue\n",
-    "\n",
-    "            Ai_ids = selected_edges[0]\n",
-    "    \n",
-    "            unique_Ai_ids = Ai_ids.unique()\n",
-    "            dim_size_Ai = unique_Ai_ids.shape[0]\n",
-    "\n",
-    "            Ai_j_ave_list = []\n",
-    "            Aj_i_ave_list = []\n",
-    "\n",
-    "            for Ai in Ai_ids:\n",
-    "                mask_Ai = selected_edges[0] == Ai\n",
-    "                edge_attr_AiAj = selected_edge_attr[mask_Ai]\n",
-    "\n",
-    "                if edge_attr_AiAj.shape[0] > 1:\n",
-    "                    Ai_j_ave = edge_attr_AiAj[:, :768].mean(dim=0, keepdim=True)\n",
-    "                    Aj_i_ave = edge_attr_AiAj[:, 768:].mean(dim=0, keepdim=True)\n",
-    "                else:\n",
-    "                    Ai_j_ave = edge_attr_AiAj[:, :768] if edge_attr_AiAj.ndim > 1 else edge_attr_AiAj[:768].unsqueeze(0)\n",
-    "                    Aj_i_ave = edge_attr_AiAj[:, 768:] if edge_attr_AiAj.ndim > 1 else edge_attr_AiAj[768:].unsqueeze(0)\n",
-    "\n",
-    "                Ai_j_ave_list.append(Ai_j_ave)\n",
-    "                Aj_i_ave_list.append(Aj_i_ave)\n",
-    "\n",
-    "            if len(Ai_j_ave_list) > 1 and len(Aj_i_ave_list) > 1:\n",
-    "                Ai_j_ave = torch.cat(Ai_j_ave_list, dim=0)\n",
-    "                Aj_i_ave = torch.cat(Aj_i_ave_list, dim=0)\n",
-    "            elif len(Ai_j_ave_list) == 1 and len(Aj_i_ave_list) == 1:\n",
-    "                Ai_j_ave = Ai_j_ave_list[0]\n",
-    "                Aj_i_ave = Aj_i_ave_list[0]\n",
-    "            else:\n",
-    "                Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6\n",
-    "\n",
-    "                mask_Aj_in_features = model_target_edge_index[1] == Aj\n",
-    "                Aj_features = target_node_features[mask_Aj_in_features]\n",
-    "\n",
-    "                if Aj_features.shape[0] > 1:\n",
-    "                    Aj_mean = Aj_features.mean(dim=0, keepdim=True)\n",
-    "                else:\n",
-    "                    Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features\n",
-    "\n",
-    "                dom_Wj_list.append(Wj.unsqueeze(0))\n",
-    "                Aj_mean_list.append(Aj_mean)\n",
-    "                continue\n",
-    "\n",
-    "            mask_Aj_in_features = model_target_edge_index[1] == Aj\n",
-    "            Aj_features = target_node_features[mask_Aj_in_features]\n",
-    "\n",
-    "            if Aj_features.shape[0] > 1:\n",
-    "                Aj_mean = Aj_features.mean(dim=0, keepdim=True)\n",
-    "            else:\n",
-    "                Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features\n",
-    "\n",
-    "            Ai_features_list = []\n",
-    "            for Ai in Ai_ids:\n",
-    "                mask_Ai = model_target_edge_index[1] == Ai\n",
-    "                Ai_feature = target_node_features[mask_Ai]\n",
-    "    \n",
-    "                if Ai_feature.shape[0] > 1:\n",
-    "                    Ai_feature = Ai_feature.mean(dim=0, keepdim=True)\n",
-    "                else:\n",
-    "                    Ai_feature = Ai_feature.unsqueeze(0) if Ai_feature.dim() == 1 else Ai_feature\n",
-    "    \n",
-    "                Ai_features_list.append(Ai_feature)\n",
-    "\n",
-    "            if len(Ai_features_list) > 0:\n",
-    "                Ai_mean = torch.cat(Ai_features_list, dim=0)\n",
-    "            else:\n",
-    "                Ai_mean = torch.empty((0, 768), device=target_node_features.device)\n",
-    "\n",
-    "            Aj_mean_expanded = Aj_mean.expand(dim_size_Ai, -1)\n",
-    "\n",
-    "            if Ai_j_ave.numel() == 0 or Aj_i_ave.numel() == 0:\n",
-    "                dom_Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6\n",
-    "            else:\n",
-    "                dist_Ai = torch.norm(Ai_mean - Ai_j_ave, dim=1)\n",
-    "                dist_Aj = torch.norm(Aj_mean - Aj_i_ave, dim=1)\n",
-    "                \n",
-    "                beta = 0.5\n",
-    "                d_0 = 1\n",
-    "                Wi = 1 / (1 + torch.exp(-beta * (dist_Ai - d_0)))\n",
-    "                Wj = 1 / (1 + torch.exp(-beta * (dist_Aj - d_0)))\n",
-    "                \n",
-    "                Wj = Wj.unsqueeze(0) if Wj.dim() == 0 else Wj\n",
-    "                dom_Wj = Wj.mean(dim=0, keepdim=True)\n",
-    "\n",
-    "            dom_Wj_list.append(dom_Wj.unsqueeze(0) if dom_Wj.dim() == 1 else dom_Wj)\n",
-    "            Aj_mean_list.append(Aj_mean.unsqueeze(0) if Aj_mean.dim() == 1 else Aj_mean)\n",
-    "\n",
-    "        dom_Wj = torch.cat(dom_Wj_list, dim=0)\n",
-    "        Aj_mean = torch.cat(Aj_mean_list, dim=0)\n",
-    "\n",
-    "        with torch.amp.autocast('cuda'):\n",
-    "            domination_true = self.fc_dom_true(dom_Wj * Aj_mean)\n",
-    "    \n",
-    "        domination_true = (domination_true - domination_true.mean(dim=0)) / (domination_true.std(dim=0) + 1e-6)\n",
-    "        domination_true = F.relu(domination_true)\n",
-    "\n",
-    "        dom_out = self.fc1(memory_applied)\n",
-    "        dom_out = self.bn1(dom_out)\n",
-    "        dom_out = F.relu(dom_out)\n",
-    "        \n",
-    "        dom_out = self.fc2(dom_out)\n",
-    "        dom_out = self.bn2(dom_out)\n",
-    "        dom_out = F.relu(dom_out)\n",
-    "        \n",
-    "        return dom_out, domination_true\n",
-    "\n",
-    "class GNNModel(nn.Module):\n",
-    "    def __init__(self, model_in_channels, target_in_channels, edge_in_channels, target_edge_in_channels, total_epochs):\n",
-    "        super(GNNModel, self).__init__()\n",
-    "\n",
-    "        self.hidden_channels = 256\n",
-    "        self.heads = 8\n",
-    "        \n",
-    "        self.model_target_gat = ModelTargetAttentionGAT(\n",
-    "            model_in_channels, target_in_channels, edge_in_channels, \n",
-    "            self.hidden_channels, self.heads, total_epochs\n",
-    "        )\n",
-    "        \n",
-    "        self.feature_enhancement_target = FeatureEnhancement(self.heads * self.hidden_channels)\n",
-    "\n",
-    "        self.target_feature_enhancement = TargetFeatureEnhancement(self.heads * self.hidden_channels, self.hidden_channels)\n",
-    "\n",
-    "        self.target_domination = TargetDominationLayer(self.hidden_channels)\n",
-    "\n",
-    "        self.domination_layer = DominationLayer(self.hidden_channels)\n",
-    "\n",
-    "    def forward(self, model_x, target_x, model_target_edge_index, model_target_edge_attr, target_edge_index, target_edge_attr):\n",
-    "        target_x_new, target_index, attn_score = self.model_target_gat(model_x, target_x, model_target_edge_index, model_target_edge_attr)\n",
-    "\n",
-    "        target_x_new = self.feature_enhancement_target(target_x_new)\n",
-    "\n",
-    "        target_x_new = self.target_feature_enhancement(target_x_new)\n",
-    "\n",
-    "        memory_applied, x_diff, edge_diff = self.target_domination(target_x_new, target_edge_index, target_edge_attr, target_index, target_x_new)\n",
-    "\n",
-    "        dom_out, domination_true = self.domination_layer(memory_applied, target_index, target_edge_index, target_edge_attr, model_target_edge_index, target_node_features, memory_applied)\n",
-    "\n",
-    "        return attn_score, memory_applied, x_diff, edge_diff, dom_out, domination_true\n",
-    "\n",
-    "total_epochs = 200\n",
-    "gnn_model = GNNModel(model_in_channels, target_in_channels, edge_in_channels, target_edge_in_channels, total_epochs).to(device)\n",
-    "optimizer = torch.optim.Adam(gnn_model.parameters(), lr=0.001)\n",
-    "\n",
-    "scaler = torch.amp.GradScaler('cuda')\n",
-    "\n",
-    "def plot_pca_projection(data, title, save_path):\n",
-    "    scaler = StandardScaler()\n",
-    "    data_scaled = scaler.fit_transform(data)\n",
-    "\n",
-    "    pca = PCA(n_components=2)\n",
-    "    projected = pca.fit_transform(data_scaled)\n",
-    "\n",
-    "    plt.figure(figsize=(8, 6))\n",
-    "    plt.scatter(projected[:, 0], projected[:, 1], alpha=0.5)\n",
-    "    plt.xlabel(\"PCA Component 1\")\n",
-    "    plt.ylabel(\"PCA Component 2\")\n",
-    "    plt.title(title)\n",
-    "    plt.grid(True)\n",
-    "\n",
-    "    # **プロットを保存**\n",
-    "    plt.savefig(save_path)\n",
-    "    plt.show()\n",
-    "\n",
-    "for epoch in range(total_epochs):\n",
-    "    gnn_model.train()\n",
-    "    optimizer.zero_grad()\n",
-    "    \n",
-    "    with torch.amp.autocast('cuda'):\n",
-    "        attn_score, memory_applied, x_diff, edge_diff, dom_out, domination_true = gnn_model(\n",
-    "            model_node_features, target_node_features,\n",
-    "            model_target_edge_index, model_target_edge_attr,\n",
-    "            target_edge_index, target_edge_attr\n",
-    "        )\n",
-    "\n",
-    "        edge_loss = F.mse_loss(x_diff.float(), edge_diff.float())\n",
-    "        domination_loss = F.mse_loss(dom_out.float(), domination_true.float())\n",
-    "\n",
-    "        loss = 2.0 * edge_loss + 0.1 * domination_loss\n",
-    "\n",
-    "    scaler.scale(loss).backward()\n",
-    "    scaler.unscale_(optimizer)\n",
-    "    scaler.step(optimizer)\n",
-    "    scaler.update()\n",
-    "\n",
-    "    attn_mean_per_node = attn_score.mean(dim=1)\n",
-    "    attn_mean = attn_mean_per_node.mean().item()\n",
-    "    attn_std = attn_mean_per_node.std().item()\n",
-    "    \n",
-    "    dom_out_nodewise_mean = dom_out.mean(dim=1)\n",
-    "    dom_out_mean = dom_out_nodewise_mean.mean().item()\n",
-    "    dom_out_std = dom_out_nodewise_mean.std().item()\n",
-    "\n",
-    "    loss_records.append([\n",
-    "        epoch + 1, edge_loss.item(), domination_loss.item(), loss.item(),\n",
-    "        attn_mean, attn_std, dom_out_mean, dom_out_std\n",
-    "    ])\n",
-    "    \n",
-    "    print(f\"Epoch {epoch+1}, edge_loss: {edge_loss.item()}, domination_loss: {domination_loss.item()}, total_loss: {loss.item()}\")\n",
-    "\n",
-    "    if epoch % 50 == 0:\n",
-    "        torch.save(dom_out, os.path.join(output_dir, f\"domination_output_epoch{epoch}.pt\"))\n",
-    "    \n",
-    "    if epoch % 50 == 0:\n",
-    "        attn_score_data = attn_score.detach().cpu().numpy()\n",
-    "        plot_pca_projection(attn_score_data, f\"PCA Projection of Attention Score (Epoch {epoch})\", \n",
-    "                            os.path.join(output_dir, f\"pca_attn_score_epoch{epoch}.png\"))\n",
-    "\n",
-    "        dom_out_data = dom_out.detach().cpu().numpy()\n",
-    "        plot_pca_projection(dom_out_data, f\"PCA Projection of Domination Output (Epoch {epoch})\", \n",
-    "                            os.path.join(output_dir, f\"pca_dom_out_epoch{epoch}.png\"))\n",
-    "\n",
-    "gnn_model.eval()\n",
-    "\n",
-    "torch.save(gnn_model, os.path.join(output_dir, \"gnn_model_final.pt\"))\n",
-    "torch.save(gnn_model.state_dict(), os.path.join(output_dir, \"gnn_model_final_state_dict.pt\"))\n",
-    "torch.save(dom_out, os.path.join(output_dir, \"final_domination_output.pt\"))\n",
-    "torch.save(attn_score, os.path.join(output_dir, \"final_attn_score.pt\"))\n",
-    "\n",
-    "csv_path = os.path.join(output_dir, \"loss_and_attn_score.csv\")\n",
-    "df = pd.DataFrame(\n",
-    "    loss_records,\n",
-    "    columns=[\n",
-    "        \"Epoch\", \"Edge Loss\", \"Domination Loss\", \"Total Loss\",\n",
-    "        \"Attn Score Mean\", \"Attn Score Std\", \"Dom Out Mean\", \"Dom Out Std\"\n",
-    "    ]\n",
-    ")\n",
-    "df.to_csv(csv_path, index=False)\n",
-    "\n",
-    "print(\"GNN model and training data have been saved @./data/gnn_data/\")\n",
-    "\n",
-    "attn_score_data = attn_score.detach().cpu().numpy()\n",
-    "plot_pca_projection(attn_score_data, \"Final PCA Projection of Attention Score\", os.path.join(output_dir, \"pca_attn_score_final.png\"))\n",
-    "\n",
-    "dom_out_data = dom_out.detach().cpu().numpy()\n",
-    "plot_pca_projection(dom_out_data, \"Final PCA Projection of Domination Output\", os.path.join(output_dir, \"pca_dom_out_final.png\"))\n",
-    "\n",
-    "domination_true_data = domination_true.detach().cpu().numpy()\n",
-    "plot_pca_projection(domination_true_data, \"PCA Projection of Domination True\", os.path.join(output_dir, \"pca_domination_true.png\"))\n",
-    "\n",
-    "edge_weight_tensor = torch.tensor(edge_weight_list, dtype=torch.float32)\n",
-    "edge_weight_index_tensor = torch.tensor(edge_weight_index_list, dtype=torch.int64)\n",
-    "\n",
-    "torch.save(edge_weight_tensor, os.path.join(output_dir, \"edge_weight.pt\"))\n",
-    "torch.save(edge_weight_index_tensor, os.path.join(output_dir, \"edge_weight_index.pt\"))\n",
-    "\n",
-    "print(\"GNN model learning completed\")"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.10.11"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+import os
+import csv
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch_scatter
+from torch_geometric.nn import GATConv
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+model_node_features = torch.load("./data/pt_data/model_features.pt")
+model_target_edge_index = torch.load("./data/pt_data/edge_index.pt").to(device)
+model_target_edge_attr = torch.load("./data/pt_data/edge_attr.pt").to(device).float()
+target_node_features = torch.load("./data/pt_data/target_features.pt")
+target_edge_index = torch.load("./data/pt_data/target_edge_index.pt").to(device)
+target_edge_attr = torch.load("./data/pt_data/target_edge_attr.pt").to(device).float()
+target_edge_dict = torch.load("./data/pt_data/target_edge_dict.pt")
+
+for key in target_edge_dict.keys():
+    target_edge_dict[key] = (target_edge_dict[key][0].to(device).float(),
+                             target_edge_dict[key][1].to(device).float())
+
+def get_model_features(edge_index, model_features):
+    source_nodes = edge_index[0].tolist()
+    extracted_features = []
+
+    for model_id in source_nodes:
+        if model_id in model_features:
+            model_features_tensor = model_features[model_id].to(device).float()
+        else:
+            model_features_tensor = torch.zeros((768,), dtype=torch.float32, device=device)
+        extracted_features.append(model_features_tensor)
+
+    if len(extracted_features) == 0:
+        return torch.empty((0, 768), dtype=torch.float32, device=device)
+
+    model_feature_tensor = torch.stack(extracted_features).to(device).float()
+    return model_feature_tensor
+
+def get_target_features(edge_index, target_node_features):
+    target_nodes = edge_index[1].tolist()
+    extracted_features = []
+
+    for target_id in target_nodes:
+        if target_id in target_node_features:
+            target_features_tensor = target_node_features[target_id].to(device).float()
+        else:
+            target_features_tensor = torch.zeros((768,), dtype=torch.float32, device=device)
+        extracted_features.append(target_features_tensor)
+
+    if len(extracted_features) == 0:
+        return torch.empty((0, 768), dtype=torch.float32, device=device)
+
+    target_feature_tensor = torch.stack(extracted_features).to(device).float()
+    return target_feature_tensor
+
+output_dir = "./data/gnn_data/"
+os.makedirs(output_dir, exist_ok=True)
+
+loss_records = []
+
+edge_weight_list = []
+edge_weight_index_list = []
+
+model_node_features = get_model_features(model_target_edge_index, model_node_features)
+target_node_features = get_target_features(model_target_edge_index, target_node_features)
+
+model_in_channels = model_node_features.shape[1]
+target_in_channels = target_node_features.shape[1]
+edge_in_channels = model_target_edge_attr.shape[1]
+target_edge_in_channels = target_edge_attr.shape[1]
+
+class ModelTargetAttentionGAT(nn.Module):
+    def __init__(self, model_in_channels, target_in_channels, edge_in_channels, hidden_channels=256, heads=8, total_epochs=10):
+        super(ModelTargetAttentionGAT, self).__init__()
+
+        self.hidden_channels = hidden_channels
+        self.heads = heads
+        self.total_epochs = total_epochs
+
+        self.model_transform = nn.Linear(model_in_channels, heads * hidden_channels, bias=False)
+        self.target_transform = nn.Linear(target_in_channels, heads * hidden_channels, bias=False)
+
+        self.edge_attn_transform = nn.Linear(768, heads * hidden_channels, bias=False)
+
+        self.gat_target = GATConv(heads * hidden_channels, hidden_channels, heads=heads, concat=True)
+
+        self.batch_norm1 = nn.BatchNorm1d(2048, momentum=0.01)
+        self.batch_norm2 = nn.BatchNorm1d(2048, momentum=0.01)
+        
+        self.prelu_m_t = nn.PReLU(num_parameters=heads)
+        self.prelu_m_n = nn.PReLU(num_parameters=heads)
+        self.prelu_t = nn.PReLU(num_parameters=heads)
+
+        self.temperature_m_t = nn.Parameter(torch.tensor(1.0), requires_grad=True)
+        self.temperature_m_n = nn.Parameter(torch.tensor(1.0), requires_grad=True)
+        self.temperature_t = nn.Parameter(torch.tensor(1.0), requires_grad=True)
+
+        self.min_alpha, self.max_alpha = 0.05, 0.2
+        self.min_temp, self.max_temp = 0.5, 1.5
+        
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.model_transform.weight)
+        nn.init.xavier_uniform_(self.target_transform.weight)
+        nn.init.xavier_uniform_(self.edge_attn_transform.weight)
+
+    def forward(self, model_x, target_x, edge_index, edge_attr):
+        model_x_proj = self.model_transform(model_x).view(-1, self.heads * self.hidden_channels)
+        target_x_proj = self.target_transform(target_x).view(-1, self.heads * self.hidden_channels)
+
+        model_x_proj = self.batch_norm1(model_x_proj)
+        target_x_proj = self.batch_norm2(target_x_proj)
+
+        model_x_proj = model_x_proj.view(-1, self.heads, self.hidden_channels)
+        target_x_proj = target_x_proj.view(-1, self.heads, self.hidden_channels)
+
+        max_valid_index = target_x_proj.shape[0] - 1
+        out_of_bounds_mask = edge_index[1] > max_valid_index
+
+        edge_attr_proj = edge_attr[:, :768] - edge_attr[:, 768:]
+
+        edge_attn_values = self.edge_attn_transform(edge_attr_proj)
+        edge_attn_values = edge_attn_values.view(-1, self.heads, self.hidden_channels)
+
+        selected_target_x_proj = target_x_proj.index_select(0, edge_index[1])
+
+        with torch.no_grad():
+            self.prelu_m_t.weight.data.clamp_(self.min_alpha, self.max_alpha)
+            self.prelu_m_n.weight.data.clamp_(self.min_alpha, self.max_alpha)
+            self.prelu_t.weight.data.clamp_(self.min_alpha, self.max_alpha)
+            
+        attn_m_t = torch.matmul(model_x_proj.index_select(0, edge_index[0]), edge_attn_values.transpose(-1, -2))
+        attn_m_t = attn_m_t.mean(dim=-1)
+        attn_m_t = self.prelu_m_t(attn_m_t)
+        attn_m_t = torch.softmax(attn_m_t / torch.clamp(self.temperature_m_t, self.min_temp, self.max_temp), dim=1)
+
+        attn_m_n = torch.matmul(model_x_proj.index_select(0, edge_index[0]), edge_attn_values.transpose(-1, -2))
+        attn_m_n = attn_m_n.mean(dim=-1)
+        attn_m_n = self.prelu_m_n(attn_m_n)
+        attn_m_n = torch.softmax(attn_m_n / torch.clamp(self.temperature_m_n, self.min_temp, self.max_temp), dim=1)
+
+        attn_t = torch.matmul(target_x_proj.index_select(0, edge_index[1]), edge_attn_values.transpose(-1, -2))
+        attn_t = attn_t.mean(dim=-1)
+        attn_t = self.prelu_t(attn_t)
+        attn_t = torch.softmax(attn_t / torch.clamp(self.temperature_t, self.min_temp, self.max_temp), dim=1)
+
+        unique_target_nodes = edge_index[1].unique()
+
+        target_x_proj = target_x_proj.view(edge_index.shape[1], 8, 256)
+        edge_attn_values = edge_attn_values.view(edge_index.shape[1], 8, 256)
+
+        target_x_new = (
+            attn_m_n.unsqueeze(-1) * target_x_proj
+            + attn_m_t.unsqueeze(-1) * edge_attn_values
+            + attn_t.unsqueeze(-1) * target_x_proj
+        )
+
+        target_x_new = target_x_new.view(edge_index.shape[1], 2048)
+
+        target_x_new = torch_scatter.scatter_mean(
+            target_x_new.float(), edge_index[1], dim=0, dim_size=unique_target_nodes.shape[0]
+        )
+
+        attn_sum = attn_m_t + attn_m_n + attn_t
+        attn_score = torch_scatter.scatter_mean(attn_sum.float(), edge_index[1], dim=0, dim_size=unique_target_nodes.shape[0])
+
+        target_index = unique_target_nodes.tolist()
+
+        target_index = torch.tensor(target_index, dtype=torch.long, device=target_x_new.device)
+
+        return target_x_new, target_index, attn_score
+
+class FeatureEnhancement(nn.Module):
+    def __init__(self, in_channels=2048):
+        super(FeatureEnhancement, self).__init__()
+        self.fc1 = nn.Linear(in_channels, in_channels)
+        self.bn1 = nn.BatchNorm1d(in_channels, momentum=0.01)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        
+        return x
+
+class TargetFeatureEnhancement(nn.Module):
+    def __init__(self, in_channels=2048, out_channels=256):
+        super(TargetFeatureEnhancement, self).__init__()
+        self.fc1 = nn.Linear(in_channels, 1024)
+        self.bn1 = nn.BatchNorm1d(1024, momentum=0.01)
+        
+        self.fc2 = nn.Linear(1024, 512)
+        self.bn2 = nn.BatchNorm1d(512, momentum=0.01)
+        
+        self.fc3 = nn.Linear(512, out_channels)
+        self.bn3 = nn.BatchNorm1d(out_channels, momentum=0.01)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = self.fc3(x)
+        x = self.bn3(x)
+        x = F.relu(x)
+        
+        return x
+
+class TargetDominationLayer(nn.Module):
+    def __init__(self, hidden_channels, init_decay=0.8):
+        super(TargetDominationLayer, self).__init__()
+
+        self.edge_fc = nn.Linear(768, 256, bias=False)
+
+        with torch.no_grad():
+            Q, _ = torch.linalg.qr(torch.randn(768, 256))
+            self.edge_fc.weight.copy_(Q.T)
+
+        self.edge_fc.weight.requires_grad = False
+
+        self.x_fc = nn.Linear(256, 256)
+        self.x_bn = nn.BatchNorm1d(256, momentum=0.01)
+
+    def forward(self, x, target_edge_index, target_edge_attr, target_index, target_x_new):
+        device = x.device  
+
+        x_j = x[target_index]
+
+        mask = torch.isin(target_edge_index[1], target_index)
+
+        sorted_mask_indices = torch.argsort(torch.searchsorted(target_index, target_edge_index[1][mask]))
+        mask_sorted = mask.nonzero(as_tuple=True)[0][sorted_mask_indices]
+
+        filtered_edge_index = target_edge_index[:, mask_sorted]
+
+        target_ids = filtered_edge_index[1]
+        source_ids = filtered_edge_index[0]
+
+        x_i = target_x_new[source_ids]
+        x_i_ave = torch_scatter.scatter_mean(
+            x_i.float(), target_index[target_ids], dim=0, dim_size=x.shape[0]
+        )
+
+        x_diff = x_i_ave - x_j
+
+        x_diff = self.x_fc(x_diff)
+        x_diff = self.x_bn(x_diff)
+        x_diff = F.relu(x_diff)
+
+        sorted_edge_attr = target_edge_attr[mask_sorted]
+
+        edge_attr_selected = torch_scatter.scatter_mean(
+            sorted_edge_attr.float(),
+            target_ids,
+            dim=0,
+            dim_size=x.shape[0]
+        )
+
+        edge_diff = edge_attr_selected[:, :768] - edge_attr_selected[:, 768:]
+
+        edge_diff = self.edge_fc(edge_diff)
+        edge_diff = (edge_diff - edge_diff.mean(dim=0)) / (edge_diff.std(dim=0) + 1e-6)
+        edge_diff = F.relu(edge_diff)
+
+        memory_applied = x_diff + x_j
+
+        return memory_applied, x_diff, edge_diff
+
+class DominationLayer(nn.Module):
+    def __init__(self, hidden_channels):
+        super(DominationLayer, self).__init__()
+
+        self.fc_dom_true = nn.Linear(768, 256, bias=False)
+
+        with torch.no_grad():
+            Q, _ = torch.linalg.qr(torch.randn(768, 256))
+            self.fc_dom_true.weight.copy_(Q.T)
+
+        self.fc_dom_true.weight.requires_grad = False
+        
+        self.fc1 = nn.Linear(hidden_channels, 256)  
+        self.bn1 = nn.BatchNorm1d(256, momentum=0.01)
+        self.fc2 = nn.Linear(256, 256)
+        self.bn2 = nn.BatchNorm1d(256, momentum=0.01)
+
+    def forward(self, x, target_index, target_edge_index, target_edge_attr, model_target_edge_index, target_node_features, memory_applied):
+        dom_Wj_list = []
+        Aj_mean_list = []
+
+        for Aj in target_index:
+            mask_Aj = target_edge_index[1] == Aj
+            selected_edges = target_edge_index[:, mask_Aj]
+            selected_edge_attr = target_edge_attr[mask_Aj]
+
+            if selected_edges.shape[1] == 0:
+                Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6
+
+                mask_Aj_in_features = model_target_edge_index[1] == Aj
+                Aj_features = target_node_features[mask_Aj_in_features]
+
+                if Aj_features.shape[0] > 1:
+                    Aj_mean = Aj_features.mean(dim=0, keepdim=True)
+                elif Aj_features.shape[0] == 1:
+                    Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features
+                else:
+                    Aj_mean = torch.zeros((1, 768), device=target_edge_attr.device)
+
+                dom_Wj_list.append(Wj.unsqueeze(0))
+                Aj_mean_list.append(Aj_mean)
+                continue
+
+            Ai_ids = selected_edges[0]
+    
+            unique_Ai_ids = Ai_ids.unique()
+            dim_size_Ai = unique_Ai_ids.shape[0]
+
+            Ai_j_ave_list = []
+            Aj_i_ave_list = []
+
+            for Ai in Ai_ids:
+                mask_Ai = selected_edges[0] == Ai
+                edge_attr_AiAj = selected_edge_attr[mask_Ai]
+
+                if edge_attr_AiAj.shape[0] > 1:
+                    Ai_j_ave = edge_attr_AiAj[:, :768].mean(dim=0, keepdim=True)
+                    Aj_i_ave = edge_attr_AiAj[:, 768:].mean(dim=0, keepdim=True)
+                else:
+                    Ai_j_ave = edge_attr_AiAj[:, :768] if edge_attr_AiAj.ndim > 1 else edge_attr_AiAj[:768].unsqueeze(0)
+                    Aj_i_ave = edge_attr_AiAj[:, 768:] if edge_attr_AiAj.ndim > 1 else edge_attr_AiAj[768:].unsqueeze(0)
+
+                Ai_j_ave_list.append(Ai_j_ave)
+                Aj_i_ave_list.append(Aj_i_ave)
+
+            if len(Ai_j_ave_list) > 1 and len(Aj_i_ave_list) > 1:
+                Ai_j_ave = torch.cat(Ai_j_ave_list, dim=0)
+                Aj_i_ave = torch.cat(Aj_i_ave_list, dim=0)
+            elif len(Ai_j_ave_list) == 1 and len(Aj_i_ave_list) == 1:
+                Ai_j_ave = Ai_j_ave_list[0]
+                Aj_i_ave = Aj_i_ave_list[0]
+            else:
+                Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6
+
+                mask_Aj_in_features = model_target_edge_index[1] == Aj
+                Aj_features = target_node_features[mask_Aj_in_features]
+
+                if Aj_features.shape[0] > 1:
+                    Aj_mean = Aj_features.mean(dim=0, keepdim=True)
+                else:
+                    Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features
+
+                dom_Wj_list.append(Wj.unsqueeze(0))
+                Aj_mean_list.append(Aj_mean)
+                continue
+
+            mask_Aj_in_features = model_target_edge_index[1] == Aj
+            Aj_features = target_node_features[mask_Aj_in_features]
+
+            if Aj_features.shape[0] > 1:
+                Aj_mean = Aj_features.mean(dim=0, keepdim=True)
+            else:
+                Aj_mean = Aj_features.unsqueeze(0) if Aj_features.dim() == 1 else Aj_features
+
+            Ai_features_list = []
+            for Ai in Ai_ids:
+                mask_Ai = model_target_edge_index[1] == Ai
+                Ai_feature = target_node_features[mask_Ai]
+    
+                if Ai_feature.shape[0] > 1:
+                    Ai_feature = Ai_feature.mean(dim=0, keepdim=True)
+                else:
+                    Ai_feature = Ai_feature.unsqueeze(0) if Ai_feature.dim() == 1 else Ai_feature
+    
+                Ai_features_list.append(Ai_feature)
+
+            if len(Ai_features_list) > 0:
+                Ai_mean = torch.cat(Ai_features_list, dim=0)
+            else:
+                Ai_mean = torch.empty((0, 768), device=target_node_features.device)
+
+            Aj_mean_expanded = Aj_mean.expand(dim_size_Ai, -1)
+
+            if Ai_j_ave.numel() == 0 or Aj_i_ave.numel() == 0:
+                dom_Wj = torch.ones((1,), device=target_edge_attr.device) * 1e-6
+            else:
+                dist_Ai = torch.norm(Ai_mean - Ai_j_ave, dim=1)
+                dist_Aj = torch.norm(Aj_mean - Aj_i_ave, dim=1)
+                
+                beta = 0.5
+                d_0 = 1
+                Wi = 1 / (1 + torch.exp(-beta * (dist_Ai - d_0)))
+                Wj = 1 / (1 + torch.exp(-beta * (dist_Aj - d_0)))
+                
+                Wj = Wj.unsqueeze(0) if Wj.dim() == 0 else Wj
+                dom_Wj = Wj.mean(dim=0, keepdim=True)
+
+            dom_Wj_list.append(dom_Wj.unsqueeze(0) if dom_Wj.dim() == 1 else dom_Wj)
+            Aj_mean_list.append(Aj_mean.unsqueeze(0) if Aj_mean.dim() == 1 else Aj_mean)
+
+        dom_Wj = torch.cat(dom_Wj_list, dim=0)
+        Aj_mean = torch.cat(Aj_mean_list, dim=0)
+
+        with torch.amp.autocast('cuda'):
+            domination_true = self.fc_dom_true(dom_Wj * Aj_mean)
+    
+        domination_true = (domination_true - domination_true.mean(dim=0)) / (domination_true.std(dim=0) + 1e-6)
+        domination_true = F.relu(domination_true)
+
+        dom_out = self.fc1(memory_applied)
+        dom_out = self.bn1(dom_out)
+        dom_out = F.relu(dom_out)
+        
+        dom_out = self.fc2(dom_out)
+        dom_out = self.bn2(dom_out)
+        dom_out = F.relu(dom_out)
+        
+        return dom_out, domination_true
+
+class GNNModel(nn.Module):
+    def __init__(self, model_in_channels, target_in_channels, edge_in_channels, target_edge_in_channels, total_epochs):
+        super(GNNModel, self).__init__()
+
+        self.hidden_channels = 256
+        self.heads = 8
+        
+        self.model_target_gat = ModelTargetAttentionGAT(
+            model_in_channels, target_in_channels, edge_in_channels, 
+            self.hidden_channels, self.heads, total_epochs
+        )
+        
+        self.feature_enhancement_target = FeatureEnhancement(self.heads * self.hidden_channels)
+
+        self.target_feature_enhancement = TargetFeatureEnhancement(self.heads * self.hidden_channels, self.hidden_channels)
+
+        self.target_domination = TargetDominationLayer(self.hidden_channels)
+
+        self.domination_layer = DominationLayer(self.hidden_channels)
+
+    def forward(self, model_x, target_x, model_target_edge_index, model_target_edge_attr, target_edge_index, target_edge_attr):
+        target_x_new, target_index, attn_score = self.model_target_gat(model_x, target_x, model_target_edge_index, model_target_edge_attr)
+
+        target_x_new = self.feature_enhancement_target(target_x_new)
+
+        target_x_new = self.target_feature_enhancement(target_x_new)
+
+        memory_applied, x_diff, edge_diff = self.target_domination(target_x_new, target_edge_index, target_edge_attr, target_index, target_x_new)
+
+        dom_out, domination_true = self.domination_layer(memory_applied, target_index, target_edge_index, target_edge_attr, model_target_edge_index, target_node_features, memory_applied)
+
+        return attn_score, memory_applied, x_diff, edge_diff, dom_out, domination_true
+
+total_epochs = 200
+gnn_model = GNNModel(model_in_channels, target_in_channels, edge_in_channels, target_edge_in_channels, total_epochs).to(device)
+optimizer = torch.optim.Adam(gnn_model.parameters(), lr=0.001)
+
+scaler = torch.amp.GradScaler('cuda')
+
+def plot_pca_projection(data, title, save_path):
+    scaler = StandardScaler()
+    data_scaled = scaler.fit_transform(data)
+
+    pca = PCA(n_components=2)
+    projected = pca.fit_transform(data_scaled)
+
+    plt.figure(figsize=(8, 6))
+    plt.scatter(projected[:, 0], projected[:, 1], alpha=0.5)
+    plt.xlabel("PCA Component 1")
+    plt.ylabel("PCA Component 2")
+    plt.title(title)
+    plt.grid(True)
+
+    # **プロットを保存**
+    plt.savefig(save_path)
+    plt.show()
+
+for epoch in range(total_epochs):
+    gnn_model.train()
+    optimizer.zero_grad()
+    
+    with torch.amp.autocast('cuda'):
+        attn_score, memory_applied, x_diff, edge_diff, dom_out, domination_true = gnn_model(
+            model_node_features, target_node_features,
+            model_target_edge_index, model_target_edge_attr,
+            target_edge_index, target_edge_attr
+        )
+
+        edge_loss = F.mse_loss(x_diff.float(), edge_diff.float())
+        domination_loss = F.mse_loss(dom_out.float(), domination_true.float())
+
+        loss = 2.0 * edge_loss + 0.1 * domination_loss
+
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    scaler.step(optimizer)
+    scaler.update()
+
+    attn_mean_per_node = attn_score.mean(dim=1)
+    attn_mean = attn_mean_per_node.mean().item()
+    attn_std = attn_mean_per_node.std().item()
+    
+    dom_out_nodewise_mean = dom_out.mean(dim=1)
+    dom_out_mean = dom_out_nodewise_mean.mean().item()
+    dom_out_std = dom_out_nodewise_mean.std().item()
+
+    loss_records.append([
+        epoch + 1, edge_loss.item(), domination_loss.item(), loss.item(),
+        attn_mean, attn_std, dom_out_mean, dom_out_std
+    ])
+    
+    print(f"Epoch {epoch+1}, edge_loss: {edge_loss.item()}, domination_loss: {domination_loss.item()}, total_loss: {loss.item()}")
+
+    if epoch % 50 == 0:
+        torch.save(dom_out, os.path.join(output_dir, f"domination_output_epoch{epoch}.pt"))
+    
+    if epoch % 50 == 0:
+        attn_score_data = attn_score.detach().cpu().numpy()
+        plot_pca_projection(attn_score_data, f"PCA Projection of Attention Score (Epoch {epoch})", 
+                            os.path.join(output_dir, f"pca_attn_score_epoch{epoch}.png"))
+
+        dom_out_data = dom_out.detach().cpu().numpy()
+        plot_pca_projection(dom_out_data, f"PCA Projection of Domination Output (Epoch {epoch})", 
+                            os.path.join(output_dir, f"pca_dom_out_epoch{epoch}.png"))
+
+gnn_model.eval()
+
+torch.save(gnn_model, os.path.join(output_dir, "gnn_model_final.pt"))
+torch.save(gnn_model.state_dict(), os.path.join(output_dir, "gnn_model_final_state_dict.pt"))
+torch.save(dom_out, os.path.join(output_dir, "final_domination_output.pt"))
+torch.save(attn_score, os.path.join(output_dir, "final_attn_score.pt"))
+
+csv_path = os.path.join(output_dir, "loss_and_attn_score.csv")
+df = pd.DataFrame(
+    loss_records,
+    columns=[
+        "Epoch", "Edge Loss", "Domination Loss", "Total Loss",
+        "Attn Score Mean", "Attn Score Std", "Dom Out Mean", "Dom Out Std"
+    ]
+)
+df.to_csv(csv_path, index=False)
+
+print("GNN model and training data have been saved @./data/gnn_data/")
+
+attn_score_data = attn_score.detach().cpu().numpy()
+plot_pca_projection(attn_score_data, "Final PCA Projection of Attention Score", os.path.join(output_dir, "pca_attn_score_final.png"))
+
+dom_out_data = dom_out.detach().cpu().numpy()
+plot_pca_projection(dom_out_data, "Final PCA Projection of Domination Output", os.path.join(output_dir, "pca_dom_out_final.png"))
+
+domination_true_data = domination_true.detach().cpu().numpy()
+plot_pca_projection(domination_true_data, "PCA Projection of Domination True", os.path.join(output_dir, "pca_domination_true.png"))
+
+edge_weight_tensor = torch.tensor(edge_weight_list, dtype=torch.float32)
+edge_weight_index_tensor = torch.tensor(edge_weight_index_list, dtype=torch.int64)
+
+torch.save(edge_weight_tensor, os.path.join(output_dir, "edge_weight.pt"))
+torch.save(edge_weight_index_tensor, os.path.join(output_dir, "edge_weight_index.pt"))
+
+print("GNN model learning completed")
